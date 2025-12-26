@@ -184,38 +184,139 @@ void draw_axes(SDL_Renderer *r, const Viewport *v, int width, int height)
     SDL_RenderLines(r, yAxis, 2);
 }
 
-SDL_Texture* render_graph_to_texture(SDL_Renderer *renderer, const char *function, 
-                                     const Viewport *viewport, int width, int height)
+SDL_Texture* render_graph_to_texture(
+    SDL_Renderer *renderer,
+    const char *function,
+    const Viewport *viewport,
+    int width, 
+    int height,
+    TTF_Font *label_font,
+    Uint32 label_font_id)
 {
     if (!function || !viewport || width <= 0 || height <= 0) {
         return NULL;
     }
 
+    // Create an RGBA surface we will draw into
     SDL_Surface *surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
     if (!surface) {
         SDL_Log("Failed to create surface: %s", SDL_GetError());
         return NULL;
     }
 
+    // Make a software renderer for the surface so we can reuse existing draw helpers
     SDL_Renderer *soft_renderer = SDL_CreateSoftwareRenderer(surface);
     if (!soft_renderer) {
-        SDL_Log("Failed to create renderer: %s", SDL_GetError());
+        SDL_Log("Failed to create software renderer: %s", SDL_GetError());
         SDL_DestroySurface(surface);
         return NULL;
     }
 
+    // Clear background
     SDL_SetRenderDrawColor(soft_renderer, 0, 0, 0, 255);
     SDL_RenderClear(soft_renderer);
 
+    // Draw grid, axes, and function
     draw_grid(soft_renderer, viewport, width, height);
     draw_axes(soft_renderer, viewport, width, height);
-    
+
     SDL_SetRenderDrawColor(soft_renderer, 0, 255, 0, 255);
     drawGraph(soft_renderer, viewport, function, width, height);
 
+    // Present the renderer before we start blitting text
     SDL_RenderPresent(soft_renderer);
     SDL_DestroyRenderer(soft_renderer);
 
+    // Now add labels by blitting text surfaces directly
+    SDL_Color label_color = { 200, 200, 200, 255 };
+
+    // --- Compute grid step & visible ranges ---
+    double step = grid_step(viewport->xScale);
+    double halfW = (width / 2.0) / viewport->xScale;
+    double halfH = (height / 2.0) / viewport->yScale;
+    double xStart = floor((viewport->cx - halfW) / step) * step;
+    double xEnd   = ceil ((viewport->cx + halfW) / step) * step;
+    double yStart = floor((viewport->cy - halfH) / step) * step;
+    double yEnd   = ceil ((viewport->cy + halfH) / step) * step;
+
+    // Axis screen positions
+    SDL_FPoint axis_origin = math_to_screen(viewport, 0.0, 0.0, width, height);
+    int axis_y = (int)axis_origin.y;
+    int axis_x = (int)axis_origin.x;
+
+    // Label padding
+    const int pad = 4;
+
+    // --- X axis labels ---
+    for (double x = xStart; x <= xEnd; x += step) {
+        if (fabs(x) < 1e-9) continue; // Skip origin
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.6g", x);
+
+        SDL_FPoint p = math_to_screen(viewport, x, 0.0, width, height);
+        int px = (int)roundf(p.x);
+
+        int ty;
+        if (axis_y >= 0 && axis_y <= height) {
+            ty = axis_y + pad;
+            if (ty + 1 > height - pad) ty = height - pad - 12;
+        } else {
+            ty = (axis_y < 0) ? pad : (height - pad - 12);
+        }
+
+        if (label_font) {
+            SDL_Surface *ts = TTF_RenderText_Blended(label_font, buf, strlen(buf), label_color);
+            if (ts) {
+                int tx = px - ts->w / 2;
+                SDL_Rect dst = { tx, ty, 0, 0 };
+                
+                if (dst.x < 0) dst.x = 0;
+                if (dst.x + ts->w > width) dst.x = width - ts->w;
+                if (dst.y < 0) dst.y = 0;
+                if (dst.y + ts->h > height) dst.y = height - ts->h;
+                
+                SDL_BlitSurface(ts, NULL, surface, &dst);
+                SDL_DestroySurface(ts);
+            }
+        }
+    }
+
+    // --- Y axis labels ---
+    for (double y = yStart; y <= yEnd; y += step) {
+        if (fabs(y) < 1e-9) continue; // Skip origin
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.6g", y);
+
+        SDL_FPoint p = math_to_screen(viewport, 0.0, y, width, height);
+        int py = (int)roundf(p.y);
+
+        int tx;
+        if (axis_x >= 0 && axis_x <= width) {
+            tx = axis_x + pad;
+            if (tx + 1 > width - pad) tx = width - pad - 30;
+        } else {
+            tx = (axis_x < 0) ? pad : (width - pad - 48);
+        }
+
+        if (label_font) {
+            SDL_Surface *ts = TTF_RenderText_Blended(label_font, buf, strlen(buf), label_color);
+            if (ts) {
+                SDL_Rect dst = { tx, py - ts->h / 2, 0, 0 };
+                
+                if (dst.x < 0) dst.x = 0;
+                if (dst.x + ts->w > width) dst.x = width - ts->w;
+                if (dst.y < 0) dst.y = 0;
+                if (dst.y + ts->h > height) dst.y = height - ts->h;
+                
+                SDL_BlitSurface(ts, NULL, surface, &dst);
+                SDL_DestroySurface(ts);
+            }
+        }
+    }
+
+    // Create a texture from the surface for GPU blitting later
     SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
     SDL_DestroySurface(surface);
 
@@ -228,11 +329,16 @@ void update_graph_texture(AppState *state, int width, int height)
         SDL_DestroyTexture(state->graphState.graph_texture);
     }
 
+    TTF_Font *label_font = NULL;
+    if (state->rendererData.fonts) label_font = state->rendererData.fonts[FONT_ID];
+
     state->graphState.graph_texture = render_graph_to_texture(
         state->rendererData.renderer,
         state->graphState.function,
         &state->graphState.viewport,
-        width, height
+        width, height,
+        label_font,
+        FONT_ID
     );
 
     state->graphState.needs_update = false;
@@ -357,7 +463,15 @@ Clay_RenderCommandArray ClayGraph_CreateLayout(AppState *state) {
         .backgroundColor = COLOR_LIGHT
     }) {
         // Title
-        CLAY_TEXT(CLAY_STRING("Graph Plotter"), CLAY_TEXT_CONFIG({
+        static char title[512];
+        snprintf(title, sizeof(title), "Graph Plotter: %s", state->graphState.function);
+        Clay_String titleString = {
+            .chars = title, 
+            .length = strlen(title),
+            .isStaticallyAllocated = true
+        };
+
+        CLAY_TEXT(titleString, CLAY_TEXT_CONFIG({
             .fontId = FONT_ID,
             .fontSize = 32,
             .textColor = {50, 50, 50, 255}
@@ -381,26 +495,37 @@ Clay_RenderCommandArray ClayGraph_CreateLayout(AppState *state) {
         });
 
         // Function display
-        CLAY_TEXT((Clay_String){.chars = state->graphState.function}, CLAY_TEXT_CONFIG({
+        static char func_display[512];
+        snprintf(func_display, sizeof(func_display), "f(x) = %s", state->graphState.function);
+        Clay_String funcString = {
+            .chars = func_display,
+            .length = strlen(func_display),
+            .isStaticallyAllocated = true
+        };
+
+        CLAY_TEXT(funcString, CLAY_TEXT_CONFIG({
             .fontId = FONT_ID,
             .fontSize = 20,
             .textColor = {50, 50, 50, 255}
         }));
-
     }
 
     return Clay_EndLayout();
 }
 
-/* =========================
-   SDL Lifecycle
-   ========================= */
+static const char *get_cmd_arg(int argc, char *argv[], const char *prefix)
+{
+    size_t len = strlen(prefix);
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], prefix, len) == 0) {
+            return argv[i] + len;
+        }
+    }
+    return NULL;
+}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
-    (void) argc;
-    (void) argv;
-
     if (!TTF_Init()) {
         return SDL_APP_FAILURE;
     }
@@ -458,7 +583,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     state->demoData = ClayVideoDemo_Initialize();
 
-    // Initialize graph state
     state->graphState = (GraphState) {
         .viewport = {
             .cx = 0.0,
@@ -469,7 +593,22 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         .velocity = {0, 0},
         .needs_update = true
     };
-    strcpy(state->graphState.function, "2x(x-1)");
+
+    /* Read function from command line */
+    const char *func_arg = get_cmd_arg(argc, argv, "--func=");
+    if (func_arg && func_arg[0] != '\0') {
+        SDL_strlcpy(
+            state->graphState.function,
+            func_arg,
+            sizeof(state->graphState.function)
+        );
+    } else {
+        SDL_strlcpy(
+            state->graphState.function,
+            "x",
+            sizeof(state->graphState.function)
+        );
+    }
 
     update_graph_texture(state, width - 32, height - 150);
 
@@ -527,7 +666,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     static Uint64 last = 0;
     Uint64 now = SDL_GetTicks();
     double dt = (now - last) / 1000.0;
-    if (dt > 0.1) dt = 0.1; // Cap delta time
+    if (dt > 0.1) dt = 0.1;
     last = now;
 
     // Update graph controls if showing graph
@@ -564,8 +703,6 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {
-    (void) result;
-
     if (result != SDL_APP_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Application failed to run");
     }

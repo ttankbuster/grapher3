@@ -6,7 +6,8 @@
                 "${workspaceFolder}/**",
                 "external/SDL3/x86_64-w64-mingw32/include",
                 "external/SDL_ttf/x86_64-w64-mingw32/include",
-                "external/SDL3_image/x86_64-w64-mingw32/include"
+                "external/SDL3_image/x86_64-w64-mingw32/include",
+                "external/clay"
             ],
             "defines": [
                 "_DEBUG",
