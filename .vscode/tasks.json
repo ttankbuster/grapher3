@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "gcc",
+      "args": [
+        "main.c",
+        "external/tinyexpr/tinyexpr.c",
+        "-o", "main.exe",
+
+        "-I", "external/SDL3/x86_64-w64-mingw32/include",
+        "-I", "external/SDL_ttf/x86_64-w64-mingw32/include",
+        "-I", "external/SDL3_image/x86_64-w64-mingw32/include",
+
+        "-L", "external/SDL3/x86_64-w64-mingw32/lib",
+        "-L", "external/SDL_ttf/x86_64-w64-mingw32/lib",
+        "-L", "external/SDL3_image/x86_64-w64-mingw32/lib",
+
+        "-lSDL3",
+        "-lSDL3_ttf",
+        "-lSDL3_image",
+        "-g"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}
