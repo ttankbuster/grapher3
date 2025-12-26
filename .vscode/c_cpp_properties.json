@@ -4,9 +4,9 @@
             "name": "Win32",
             "includePath": [
                 "${workspaceFolder}/**",
-                "B:/DevLibs/SDL3/x86_64-w64-mingw32/include",
-                "B:/DevLibs/SDL_ttf/x86_64-w64-mingw32/include",
-                "B:/DevLibs/SDL3_image/x86_64-w64-mingw32/include"
+                "external/SDL3/x86_64-w64-mingw32/include",
+                "external/SDL_ttf/x86_64-w64-mingw32/include",
+                "external/SDL3_image/x86_64-w64-mingw32/include"
             ],
             "defines": [
                 "_DEBUG",
