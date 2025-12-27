@@ -41,6 +41,8 @@ typedef struct {
     Vec2d velocity;
     char function[256];
     bool needs_update;
+    int mouseX, mouseY;
+    bool mouse_in_window;
 } GraphState;
 
 typedef struct app_state {
@@ -63,6 +65,14 @@ static inline SDL_FPoint math_to_screen(const Viewport *v, double x, double y, i
     SDL_FPoint p;
     p.x = (float)(width  / 2.0 + (x - v->cx) * v->xScale);
     p.y = (float)(height / 2.0 - (y - v->cy) * v->yScale);
+    return p;
+}
+
+static inline Vec2d screen_to_math(const Viewport *v, int sx, int sy, int width, int height)
+{
+    Vec2d p;
+    p.x = v->cx + (sx - width / 2.0) / v->xScale;
+    p.y = v->cy - (sy - height / 2.0) / v->yScale;
     return p;
 }
 
@@ -184,6 +194,122 @@ void draw_axes(SDL_Renderer *r, const Viewport *v, int width, int height)
     SDL_RenderLines(r, yAxis, 2);
 }
 
+double numerical_derivative(const char *func, double x0)
+{
+    const double h = 1e-7;
+    
+    double x = x0;
+    te_variable vars[] = {{"x", &x}};
+    int err;
+    
+    char *expanded = expand_implicit_mul(func);
+    te_expr *expr = te_compile(expanded, vars, 1, &err);
+    free(expanded);
+    
+    if (!expr || err) {
+        return NAN;
+    }
+    
+    x = x0 + h;
+    double f_plus = te_eval(expr);
+    
+    x = x0 - h;
+    double f_minus = te_eval(expr);
+    
+    te_free(expr);
+    
+    return (f_plus - f_minus) / (2.0 * h);
+}
+
+int draw_tangent(SDL_Renderer* renderer, const Viewport *v, const char* func, 
+                 int mouseX, int mouseY, int width, int height) 
+{
+    // Account for UI padding (16px on each side from Clay layout)
+    const int UI_PADDING = 16;
+    const int UI_TOP_HEIGHT = 80;  // Approximate height of title and instructions
+    
+    // Adjust mouse coordinates to graph coordinate space
+    int graph_mouse_x = mouseX - UI_PADDING;
+    int graph_mouse_y = mouseY - UI_PADDING - UI_TOP_HEIGHT;
+    int graph_width = width - 2 * UI_PADDING;
+    int graph_height = height - 2 * UI_PADDING - UI_TOP_HEIGHT - 40;  // 40 for bottom text
+    
+    // Check if mouse is within graph bounds
+    if (graph_mouse_x < 0 || graph_mouse_x >= graph_width ||
+        graph_mouse_y < 0 || graph_mouse_y >= graph_height) {
+        return 0;
+    }
+    
+    // Convert screen coords to math coords
+    Vec2d math_pos = screen_to_math(v, graph_mouse_x, graph_mouse_y, graph_width, graph_height);
+    double x0 = math_pos.x;
+    
+    // Evaluate function at x0
+    double x = x0;
+    te_variable vars[] = {{"x", &x}};
+    int err;
+    
+    char *expanded = expand_implicit_mul(func);
+    te_expr *expr = te_compile(expanded, vars, 1, &err);
+    free(expanded);
+    
+    if (!expr || err) {
+        return -1;
+    }
+    
+    double y0 = te_eval(expr);
+    te_free(expr);
+    
+    if (!isfinite(y0)) {
+        return 0;
+    }
+    
+    // Calculate derivative (slope)
+    double slope = numerical_derivative(func, x0);
+    
+    if (!isfinite(slope)) {
+        return 0;
+    }
+    
+    // Draw tangent line across visible area
+    double hw = (graph_width / 2.0) / v->xScale;
+    double x_left = v->cx - hw;
+    double x_right = v->cx + hw;
+    
+    double y_left = y0 + slope * (x_left - x0);
+    double y_right = y0 + slope * (x_right - x0);
+    
+    SDL_FPoint p1 = math_to_screen(v, x_left, y_left, graph_width, graph_height);
+    SDL_FPoint p2 = math_to_screen(v, x_right, y_right, graph_width, graph_height);
+    
+    // Adjust back to window coordinates
+    p1.x += UI_PADDING;
+    p1.y += UI_PADDING + UI_TOP_HEIGHT;
+    p2.x += UI_PADDING;
+    p2.y += UI_PADDING + UI_TOP_HEIGHT;
+    
+    // Draw tangent line in red
+    SDL_SetRenderDrawColor(renderer, 255, 50, 50, 255);
+    SDL_RenderLines(renderer, (SDL_FPoint[]){p1, p2}, 2);
+    
+    // Draw point on curve
+    SDL_FPoint point = math_to_screen(v, x0, y0, graph_width, graph_height);
+    point.x += UI_PADDING;
+    point.y += UI_PADDING + UI_TOP_HEIGHT;
+    
+    SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+    const float radius = 4.0f;
+    for (int i = -3; i <= 3; i++) {
+        for (int j = -3; j <= 3; j++) {
+            if (i*i + j*j <= 9) {
+                SDL_RenderPoint(renderer, point.x + i, point.y + j);
+            }
+        }
+    }
+    
+    return 0;
+}
+
 SDL_Texture* render_graph_to_texture(
     SDL_Renderer *renderer,
     const char *function,
@@ -197,14 +323,12 @@ SDL_Texture* render_graph_to_texture(
         return NULL;
     }
 
-    // Create an RGBA surface we will draw into
     SDL_Surface *surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
     if (!surface) {
         SDL_Log("Failed to create surface: %s", SDL_GetError());
         return NULL;
     }
 
-    // Make a software renderer for the surface so we can reuse existing draw helpers
     SDL_Renderer *soft_renderer = SDL_CreateSoftwareRenderer(surface);
     if (!soft_renderer) {
         SDL_Log("Failed to create software renderer: %s", SDL_GetError());
@@ -212,25 +336,20 @@ SDL_Texture* render_graph_to_texture(
         return NULL;
     }
 
-    // Clear background
     SDL_SetRenderDrawColor(soft_renderer, 0, 0, 0, 255);
     SDL_RenderClear(soft_renderer);
 
-    // Draw grid, axes, and function
     draw_grid(soft_renderer, viewport, width, height);
     draw_axes(soft_renderer, viewport, width, height);
 
     SDL_SetRenderDrawColor(soft_renderer, 0, 255, 0, 255);
     drawGraph(soft_renderer, viewport, function, width, height);
 
-    // Present the renderer before we start blitting text
     SDL_RenderPresent(soft_renderer);
     SDL_DestroyRenderer(soft_renderer);
 
-    // Now add labels by blitting text surfaces directly
     SDL_Color label_color = { 200, 200, 200, 255 };
 
-    // --- Compute grid step & visible ranges ---
     double step = grid_step(viewport->xScale);
     double halfW = (width / 2.0) / viewport->xScale;
     double halfH = (height / 2.0) / viewport->yScale;
@@ -239,17 +358,14 @@ SDL_Texture* render_graph_to_texture(
     double yStart = floor((viewport->cy - halfH) / step) * step;
     double yEnd   = ceil ((viewport->cy + halfH) / step) * step;
 
-    // Axis screen positions
     SDL_FPoint axis_origin = math_to_screen(viewport, 0.0, 0.0, width, height);
     int axis_y = (int)axis_origin.y;
     int axis_x = (int)axis_origin.x;
 
-    // Label padding
     const int pad = 4;
 
-    // --- X axis labels ---
     for (double x = xStart; x <= xEnd; x += step) {
-        if (fabs(x) < 1e-9) continue; // Skip origin
+        if (fabs(x) < 1e-9) continue;
 
         char buf[64];
         snprintf(buf, sizeof(buf), "%.6g", x);
@@ -282,9 +398,8 @@ SDL_Texture* render_graph_to_texture(
         }
     }
 
-    // --- Y axis labels ---
     for (double y = yStart; y <= yEnd; y += step) {
-        if (fabs(y) < 1e-9) continue; // Skip origin
+        if (fabs(y) < 1e-9) continue;
 
         char buf[64];
         snprintf(buf, sizeof(buf), "%.6g", y);
@@ -316,7 +431,6 @@ SDL_Texture* render_graph_to_texture(
         }
     }
 
-    // Create a texture from the surface for GPU blitting later
     SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
     SDL_DestroySurface(surface);
 
@@ -393,9 +507,6 @@ void update_graph_zoom(GraphState *gs, double dt)
     }
 }
 
-/* =========================
-   Clay UI Functions
-   ========================= */
 
 static inline Clay_Dimensions SDL_MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
 {
@@ -462,7 +573,6 @@ Clay_RenderCommandArray ClayGraph_CreateLayout(AppState *state) {
         },
         .backgroundColor = COLOR_LIGHT
     }) {
-        // Title
         static char title[512];
         snprintf(title, sizeof(title), "Graph Plotter: %s", state->graphState.function);
         Clay_String titleString = {
@@ -477,14 +587,12 @@ Clay_RenderCommandArray ClayGraph_CreateLayout(AppState *state) {
             .textColor = {50, 50, 50, 255}
         }));
 
-        // Instructions
-        CLAY_TEXT(CLAY_STRING("WASD to pan • Z/X to zoom • Space to toggle"), CLAY_TEXT_CONFIG({
+        CLAY_TEXT(CLAY_STRING("WASD to pan • Z/X to zoom • Space to toggle • Hover for tangent"), CLAY_TEXT_CONFIG({
             .fontId = FONT_ID,
             .fontSize = 16,
             .textColor = {100, 100, 100, 255}
         }));
 
-        // Graph display
         CLAY(CLAY_ID("GraphContainer"), {
             .layout = {
                 .sizing = layoutExpand
@@ -494,7 +602,6 @@ Clay_RenderCommandArray ClayGraph_CreateLayout(AppState *state) {
             }
         });
 
-        // Function display
         static char func_display[512];
         snprintf(func_display, sizeof(func_display), "f(x) = %s", state->graphState.function);
         Clay_String funcString = {
@@ -568,7 +675,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to load image: %s", SDL_GetError());
     }
 
-    // Initialize Clay
     uint64_t totalMemorySize = Clay_MinMemorySize();
     Clay_Arena clayMemory = (Clay_Arena) {
         .memory = SDL_malloc(totalMemorySize),
@@ -591,10 +697,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             .yScale = 50.0
         },
         .velocity = {0, 0},
-        .needs_update = true
+        .needs_update = true,
+        .mouseX = 0,
+        .mouseY = 0,
+        .mouse_in_window = false
     };
 
-    /* Read function from command line */
     const char *func_arg = get_cmd_arg(argc, argv, "--func=");
     if (func_arg && func_arg[0] != '\0') {
         SDL_strlcpy(
@@ -605,7 +713,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     } else {
         SDL_strlcpy(
             state->graphState.function,
-            "x",
+            "x^2",
             sizeof(state->graphState.function)
         );
     }
@@ -641,11 +749,20 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         case SDL_EVENT_MOUSE_MOTION:
             Clay_SetPointerState((Clay_Vector2) { event->motion.x, event->motion.y },
                                  event->motion.state & SDL_BUTTON_LMASK);
+            state->graphState.mouseX = event->motion.x;
+            state->graphState.mouseY = event->motion.y;
+            state->graphState.mouse_in_window = true;
             break;
             
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             Clay_SetPointerState((Clay_Vector2) { event->button.x, event->button.y },
                                  event->button.button == SDL_BUTTON_LEFT);
+            state->graphState.mouseX = event->button.x;
+            state->graphState.mouseY = event->button.y;
+            break;
+            
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            state->graphState.mouse_in_window = false;
             break;
             
         case SDL_EVENT_MOUSE_WHEEL:
@@ -669,7 +786,6 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (dt > 0.1) dt = 0.1;
     last = now;
 
-    // Update graph controls if showing graph
     if (show_graph) {
         update_graph_movement(&state->graphState, dt);
         update_graph_zoom(&state->graphState, dt);
@@ -681,7 +797,6 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         }
     }
 
-    // Render
     Clay_RenderCommandArray render_commands;
     if (show_demo) {
         render_commands = ClayVideoDemo_CreateLayout(&state->demoData);
@@ -695,6 +810,17 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     SDL_RenderClear(state->rendererData.renderer);
 
     SDL_Clay_RenderClayCommands(&state->rendererData, &render_commands);
+
+    if (show_graph && state->graphState.mouse_in_window) {
+        int width, height;
+        SDL_GetWindowSize(state->window, &width, &height);
+        draw_tangent(state->rendererData.renderer, 
+                     &state->graphState.viewport,
+                     state->graphState.function,
+                     state->graphState.mouseX,
+                     state->graphState.mouseY,
+                     width, height);
+    }
 
     SDL_RenderPresent(state->rendererData.renderer);
 
